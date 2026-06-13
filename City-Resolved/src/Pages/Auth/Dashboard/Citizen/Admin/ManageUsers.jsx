@@ -1,61 +1,119 @@
 import React from "react";
-import { motion } from "framer-motion";
-import { FaTools, FaCog, FaArrowLeft } from "react-icons/fa";
-import { useNavigate } from "react-router"; // Assuming you are using react-router
+import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import useAxiosSecure from "../../../Hooks/useAxiosSecure";
+import Swal from "sweetalert2";
+import { FaUsers, FaBan, FaCheckCircle } from "react-icons/fa";
+import Loader from "../../../Components/Shared/Loader";
 
 const ManageUsers = () => {
-  const navigate = useNavigate();
+  const queryClient = useQueryClient();
+  const axiosSecure = useAxiosSecure();
+
+  const { data: users = [], isLoading } = useQuery({
+    queryKey: ["users", "citizen"],
+    queryFn: async () => {
+      const res = await axiosSecure.get("/users?role=citizen");
+      return res.data;
+    },
+  });
+
+  const statusMutation = useMutation({
+    mutationFn: async ({ id, isBlocked }) => {
+      const res = await axiosSecure.patch(`/users/status/${id}`, { isBlocked });
+      return res.data;
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["users"] });
+      Swal.fire({
+        icon: "success",
+        title: "Status Updated",
+        showConfirmButton: false,
+        timer: 1000,
+      });
+    },
+  });
+
+  const handleStatusChange = (user) => {
+    const action = user.isBlocked ? "Unblock" : "Block";
+    Swal.fire({
+      title: `Are you sure you want to ${action} this user?`,
+      text: user.isBlocked
+        ? "They will be able to log in and report issues."
+        : "They will not be able to report issues.",
+      icon: "warning",
+      showCancelButton: true,
+      confirmButtonColor: user.isBlocked ? "#36d399" : "#d33",
+      confirmButtonText: `Yes, ${action} them!`,
+    }).then((result) => {
+      if (result.isConfirmed) {
+        statusMutation.mutate({ id: user._id, isBlocked: !user.isBlocked });
+      }
+    });
+  };
+
+  if (isLoading) return <Loader />;
 
   return (
-    <div className="flex flex-col items-center justify-center min-h-[75vh] p-6 text-center">
-      <motion.div
-        initial={{ opacity: 0, y: 20 }}
-        animate={{ opacity: 1, y: 0 }}
-        transition={{ duration: 0.6, ease: "easeOut" }}
-        className="max-w-lg space-y-8"
-      >
-        {/* Animated Construction Icons */}
-        <div className="relative flex justify-center items-center h-40 w-40 mx-auto">
-          {/* Spinning background gear */}
-          <motion.div
-            animate={{ rotate: 360 }}
-            transition={{ repeat: Infinity, duration: 8, ease: "linear" }}
-            className="absolute text-primary opacity-20 text-[150px]"
-          >
-            <FaCog />
-          </motion.div>
-          
-          {/* Floating foreground tools */}
-          <motion.div
-            animate={{ y: [0, -15, 0] }}
-            transition={{ repeat: Infinity, duration: 3, ease: "easeInOut" }}
-            className="relative z-10 text-7xl text-secondary drop-shadow-xl"
-          >
-            <FaTools />
-          </motion.div>
-        </div>
+    <div className="p-6">
+      <h2 className="text-3xl font-bold mb-6 flex items-center gap-2">
+        <FaUsers /> Manage Citizens ({users.length})
+      </h2>
 
-        {/* Text Content */}
-        <div className="space-y-4">
-          <h2 className="text-4xl md:text-5xl font-black text-base-content tracking-tight">
-            Under Construction
-          </h2>
-          <p className="text-lg text-base-content/60 leading-relaxed">
-            We're currently building out the <span className="font-semibold text-primary">Manage Citizens</span> feature. 
-            Our team is working hard to bring this to you soon. Check back later!
-          </p>
-        </div>
-
-        {/* Action Button */}
-        <motion.button
-          whileHover={{ scale: 1.05 }}
-          whileTap={{ scale: 0.95 }}
-          onClick={() => navigate(-1)}
-          className="btn btn-primary shadow-lg shadow-primary/30 gap-2"
-        >
-          <FaArrowLeft /> Go Back
-        </motion.button>
-      </motion.div>
+      <div className="overflow-x-auto bg-base-100 shadow-xl rounded-lg border border-base-200">
+        <table className="table">
+          <thead className="bg-base-200">
+            <tr>
+              <th>#</th>
+              <th>Name</th>
+              <th>Email</th>
+              <th>Status</th>
+              <th>Action</th>
+            </tr>
+          </thead>
+          <tbody>
+            {users.map((user, index) => (
+              <tr key={user._id}>
+                <th>{index + 1}</th>
+                <td>
+                  <div className="flex items-center gap-3">
+                    <div className="avatar">
+                      <div className="mask mask-squircle w-10 h-10">
+                        <img
+                          src={user.photo || "https://i.pravatar.cc/150"}
+                          alt={user.name}
+                        />
+                      </div>
+                    </div>
+                    <div className="font-bold">{user.name}</div>
+                  </div>
+                </td>
+                <td>{user.email}</td>
+                <td>
+                  {user.isBlocked ? (
+                    <span className="text-error font-bold flex items-center gap-1">
+                      <FaBan /> Blocked
+                    </span>
+                  ) : (
+                    <span className="text-success font-bold flex items-center gap-1">
+                      <FaCheckCircle /> Active
+                    </span>
+                  )}
+                </td>
+                <td>
+                  <button
+                    onClick={() => handleStatusChange(user)}
+                    className={`btn btn-xs ${
+                      user.isBlocked ? "btn-success" : "btn-error"
+                    }`}
+                  >
+                    {user.isBlocked ? "Unblock" : "Block"}
+                  </button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
     </div>
   );
 };
