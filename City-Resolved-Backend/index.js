@@ -6,6 +6,9 @@ const { MongoClient, ServerApiVersion, ObjectId } = require("mongodb");
 const app = express();
 const port = process.env.PORT || 3000;
 
+const { GoogleGenerativeAI } = require("@google/generative-ai");
+const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+
 // Database connection string from the first file setup
 const mongoStr = process.env.MongoDB;
 
@@ -20,6 +23,63 @@ const client = new MongoClient(mongoStr, {
   },
 });
 
+// --- AI CONFIGURATION (Gemini 1.5 Flash) ---
+async function autoDetectCategory(imageUrl) {
+    try {
+        // 1. Fetch the image from the URL and convert it to a Base64 Buffer for Gemini
+        const response = await fetch(imageUrl);
+        if (!response.ok) return { category: "Uncategorized", rawTags: "Image fetch failed" };
+
+        const arrayBuffer = await response.arrayBuffer();
+        const buffer = Buffer.from(arrayBuffer);
+        const base64Image = buffer.toString("base64");
+        const mimeType = response.headers.get("content-type") || "image/jpeg";
+
+        // 2. Setup the Vision Model
+        const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
+
+        // 3. Strict Prompt Engineering
+        const prompt = `You are a civic infrastructure AI. Analyze this image and classify the primary issue into EXACTLY ONE of the following categories. Reply with ONLY the category name, nothing else.
+        
+        Categories:
+        - Road Damage
+        - Waste Management
+        - Street Light Issue
+        - Water Leakage & Drainage
+        - Uncategorized`;
+
+        // 4. Execute Inference
+        const result = await model.generateContent([
+            prompt,
+            {
+                inlineData: {
+                    data: base64Image,
+                    mimeType: mimeType
+                }
+            }
+        ]);
+
+        const aiResponse = result.response.text().trim();
+
+        // 5. Enforce strict matching to prevent database corruption
+        const validCategories = [
+            "Road Damage", 
+            "Waste Management", 
+            "Street Light Issue", 
+            "Water Leakage & Drainage"
+        ];
+
+        if (validCategories.includes(aiResponse)) {
+            return { category: aiResponse, rawTags: `Gemini Classification: ${aiResponse}` };
+        } else {
+            return { category: "Uncategorized", rawTags: `Gemini Output (No Match): ${aiResponse}` };
+        }
+    } catch (error) {
+        console.error("Gemini API Error:", error.message);
+        return { category: "Uncategorized", rawTags: `API Error: ${error.message}` };
+    }
+}
+
 async function run() {
   try {
     const database = client.db("City-Resolved");
@@ -30,7 +90,29 @@ async function run() {
     // ==========================================
     // USER ROUTES
     // ==========================================
-    
+        // --- AI ANALYSIS ROUTE ---
+    app.post("/analyze-image", async (req, res) => {
+      const { imageUrl } = req.body;
+      if (!imageUrl) return res.status(400).send({ message: "Image URL required" });
+
+      try {
+          const aiData = await autoDetectCategory(imageUrl); 
+          const detectedCategory = aiData.category;
+          
+          const title = detectedCategory !== "Uncategorized" ? `Reported: ${detectedCategory}` : "";
+          const description = detectedCategory !== "Uncategorized" ? `A citizen has logged an entry under the ${detectedCategory.toLowerCase()} category.` : "";
+
+          res.send({
+              category: detectedCategory,
+              title: title,
+              description: description,
+              rawCaption: aiData.rawTags 
+          });
+      } catch (error) {
+          res.status(500).send({ message: "Analysis failed" });
+      }
+    });
+
     app.post("/users", async (req, res) => {
       const user = req.body;
       const query = { email: user.email };
@@ -148,32 +230,50 @@ async function run() {
     // ISSUE ROUTES
     // ==========================================
 
-    app.post("/issues", async (req, res) => {
+   app.post("/issues", async (req, res) => {
       const issue = req.body;
-      const userEmail = issue.reportedBy?.email;
+      const userEmail = issue.reportedBy.email;
 
       const user = await usersCollection.findOne({ email: userEmail });
 
       if (user?.isBlocked) {
-        return res.status(403).send({ message: "You are blocked from posting issues." });
+        return res
+          .status(403)
+          .send({ message: "You are blocked from posting issues." });
       }
 
-      // Checking the limit of free posts
-      if (user && !user.isVerified) {
+      if (!user?.isVerified) {
         const count = await issuesCollection.countDocuments({
           "reportedBy.email": userEmail,
         });
 
-        if (count >= 3) {
+        if (count >= 100) {
           return res.send({
             insertedId: null,
-            message: "Free limit reached.",
+            message: "Free limit reached. Please upgrade to Premium.",
           });
         }
       }
 
+      let detectedCategory = issue.category || "Uncategorized";
+
+      if (
+        issue.photo &&
+        (!issue.category || issue.category === "Uncategorized")
+      ) {
+        detectedCategory = issue.category; 
+      }
+
+      const generatedTitle = issue.title || `Reported: ${detectedCategory}`;
+      const generatedDescription =
+        issue.description ||
+        `A citizen has logged an entry under the ${detectedCategory.toLowerCase()} category.`;
+
       const newIssue = {
         ...issue,
+        title: generatedTitle,
+        category: detectedCategory,
+        description: generatedDescription,
         status: "pending",
         priority: "normal",
         upvotes: 0,
@@ -186,13 +286,14 @@ async function run() {
       const timelineEntry = {
         issueId: result.insertedId,
         status: "pending",
-        message: "Issue reported by citizen",
-        updatedBy: user?.name || "Citizen",
+        message: "Issue registered into system",
+        updatedBy: user.name,
         role: "citizen",
         date: new Date(),
       };
 
       await timelinesCollection.insertOne(timelineEntry);
+
       res.send(result);
     });
 
